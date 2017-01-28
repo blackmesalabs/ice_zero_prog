@@ -19,10 +19,12 @@
 # Ver   When       Who       What
 # ----  --------   --------  ---------------------------------------------------
 # 0.01  2017.01.22 khubbard  Creation. Reads PROM ID.
-#
+# 0.02  2017.01.28 khubbard  Writes Lattice bitfil to PROM now.
 ##############################################################################
 import sys;
 import RPi.GPIO as GPIO;
+import time;
+from time import sleep;
 
 class App:
   def __init__(self):
@@ -37,16 +39,131 @@ class App:
     self.arg0     = args[1];
     self.arg1     = args[2];
     self.spi_link = spi_link( platform="ice_zero_proto" );
-#   miso_bytes = self.spi_link.xfer( [0xAB],  0 );# Wake from deep sleep
-    miso_bytes = self.spi_link.xfer( [0x9F], 17 );# Micron READ_ID
+    self.prom     = micron_prom( self.spi_link );
+
+    file_name = self.arg0;
+    if ( self.arg1 == None ):
+      addr = 0x000000;
+    else:
+      addr = int( self.arg1, 16 );
+
+    (mfr_id,dev_id,dev_cap) = self.prom.read_id();
+    print("Found "+mfr_id+" "+dev_id+" "+str(dev_cap)+" MBytes" );
+
+    print("Erasing and loading " + file_name + " to %06x" % addr );
+    self.prom.write_file_to_mem( file_name, addr );
+
+    # Read out 1st 8 bytes as visual check
+    miso_bytes = self.prom.read_mem( addr, 8 );
     for each in miso_bytes:
       print("%02x" % ( each ) );
+
     self.spi_link.close();
     return;
 
   def main_loop( self ):
     while( True ):
-      pass;
+      pass;# Not used for this design
+    return;
+
+
+###############################################################################
+# Class for bit banging to Micron SPI PROM connected to Lattice ICE40 FPGA
+# The memory is organized as 256 (64KB) main sectors that are further divided
+# into 16 subsectors each (4096 subsectors in total). The memory can be erased 
+# one 4KB subsector at a time, 64KB sectors at a time, or as a whole. 
+class micron_prom:
+  def __init__ ( self, spi_link ):
+    self.id           = 0x9f;# Read ID   
+    self.wr           = 0x02;# Page Program
+    self.rd           = 0x03;# Read Data
+    self.rd_status    = 0x05;# Read Data
+    self.wr_en        = 0x06;# Write Enable 
+    self.wr_dis       = 0x04;# Write Disable
+    self.relpd        = 0xab;# Release Deep PowerDown
+    self.subsec_erase = 0x20;# Erase Sector
+    self.sec_erase    = 0xd8;# Erase Sector
+    self.bulk_erase   = 0xc7;# Bulk Erase Device
+    self.spi_link = spi_link;
+    return;
+
+  def read_id ( self ):
+    miso_bytes = self.spi_link.xfer( [0x9F], 17 );# Micron READ_ID
+    ( mfr_id, dev_id, dev_capacity ) = miso_bytes[0:3];
+    if ( mfr_id == 0x20 ):
+      mfr_id = "Micron";
+    else:
+      mfr_id = "%02" % mfr_id;
+    if ( dev_id == 0xBA ): 
+      dev_id = "N25Q128A";
+    else:
+      dev_id = "%02" % dev_id;
+    dev_capacity = (2**dev_capacity) / (1024 * 1024 );
+    return ( mfr_id, dev_id, dev_capacity );# 0x20, 0xBA, 0x18 == 128Mb
+
+  def read_mem ( self, addr, num_bytes ):
+    mosi_bytes = [ self.rd, 
+                   ( addr & 0xFF0000 ) >> 16,
+                   ( addr & 0x00FF00 ) >>  8,
+                   ( addr & 0x0000FF ) >>  0 ];
+    miso_bytes = self.spi_link.xfer( mosi_bytes, num_bytes );
+    return miso_bytes;
+
+  def write_file_to_mem( self, file_name, addr ):
+    # Great example of reading a binary file
+    import array, struct;
+    bytes = array.array('B');
+    file_in = open ( file_name, 'r' );
+    file_bytes = file_in.read();
+    total_bytes = len( file_bytes );
+    miso_bytes = self.spi_link.xfer( [ self.wr_en ], 0 );
+    mosi_bytes = [ self.sec_erase, 
+                   ( addr & 0xFF0000 ) >> 16,
+                   ( addr & 0x00FF00 ) >>  8,
+                   ( addr & 0x0000FF ) >>  0 ];
+    miso_bytes = self.spi_link.xfer( mosi_bytes, 0 );# Erase the sector
+    miso_bytes = self.spi_link.xfer( [ self.wr_dis ], 0 );
+    
+    status = 0x01;# Loop until Status says erase is done
+    while ( status & 0x01 != 0x00 ):
+      status = self.spi_link.xfer( [ self.rd_status ], 1 )[0];
+    k = 0;
+    perc = 0; xferd = 0;
+    while( len( file_bytes ) > 0 ):
+      if ( ( 100.0*float(xferd) / float(total_bytes) ) > perc ):
+        print("%d%%" % (perc) );
+        perc += 10;
+      # Grab 256 bytes at a time
+      if ( len( file_bytes ) > 256 ):
+        xfer_bytes = file_bytes[0:256];
+        file_bytes = file_bytes[256:];
+      else:
+        xfer_bytes = file_bytes[0:];
+        file_bytes = [];
+      mosi_bytes = [ self.wr, 
+                     ( addr & 0xFF0000 ) >> 16,
+                     ( addr & 0x00FF00 ) >>  8,
+                     ( addr & 0x0000FF ) >>  0 ];
+      for byte in xfer_bytes:
+        mosi_bytes += [ ord( byte )];
+      miso_bytes = self.spi_link.xfer( [ self.wr_en ], 0 );
+      miso_bytes = self.spi_link.xfer( mosi_bytes, 0 );# Write 256 bytes  
+      miso_bytes = self.spi_link.xfer( [ self.wr_dis ], 0 );
+      status = 0x01;# Loop until Status says write is done
+      while ( status & 0x01 != 0x00 ):
+        status = self.spi_link.xfer( [ self.rd_status ], 1 )[0];
+      addr += 256; xferd += 256;
+    return;
+
+  def write_mem ( self, addr, num_bytes ):
+    mosi_bytes = [ self.rd, 
+                   ( addr & 0xFF0000 ) >> 16,
+                   ( addr & 0x00FF00 ) >>  8,
+                   ( addr & 0x0000FF ) >>  0 ];
+    miso_bytes = self.spi_link.xfer( mosi_bytes, num_bytes );
+    return miso_bytes;
+
+  def close( self ):
     return;
 
 
