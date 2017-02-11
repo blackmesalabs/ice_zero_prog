@@ -20,6 +20,8 @@
 # ----  --------   --------  ---------------------------------------------------
 # 0.01  2017.01.22 khubbard  Creation. Reads PROM ID.
 # 0.02  2017.01.28 khubbard  Writes Lattice bitfil to PROM now.
+# 0.02  2017.01.29 khubbard  Bulk Erase Added.
+# NOTE: Sector Erase not working yet.
 ##############################################################################
 import sys;
 import RPi.GPIO as GPIO;
@@ -49,6 +51,10 @@ class App:
 
     (mfr_id,dev_id,dev_cap) = self.prom.read_id();
     print("Found "+mfr_id+" "+dev_id+" "+str(dev_cap)+" MBytes" );
+
+    print("Bulk Erasing...");
+    self.prom.erase();
+    print("Complete.");
 
     print("Erasing and loading " + file_name + " to %06x" % addr );
     self.prom.write_file_to_mem( file_name, addr );
@@ -100,6 +106,16 @@ class micron_prom:
       dev_id = "%02" % dev_id;
     dev_capacity = (2**dev_capacity) / (1024 * 1024 );
     return ( mfr_id, dev_id, dev_capacity );# 0x20, 0xBA, 0x18 == 128Mb
+
+  def erase( self ):
+    miso_bytes = self.spi_link.xfer( [ self.wr_en ], 0 );
+    mosi_bytes = [ self.bulk_erase ];
+    miso_bytes = self.spi_link.xfer( mosi_bytes, 0 );
+    status = 0x01;# Loop until Status says erase is done
+    while ( status & 0x01 != 0x00 ):
+      status = self.spi_link.xfer( [ self.rd_status ], 1 )[0];
+    miso_bytes = self.spi_link.xfer( [ self.wr_dis ], 0 );
+    return;
 
   def read_mem ( self, addr, num_bytes ):
     mosi_bytes = [ self.rd, 
