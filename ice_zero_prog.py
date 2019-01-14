@@ -1,5 +1,7 @@
+#!/usr/bin/python
 ##############################################################################
-# ice_zero_prog.py
+# ice_zero_prog.py <file.bin> [<dest_addr>]
+#
 #             Copyright (c) Kevin M. Hubbard 2017 BlackMesaLabs
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -49,8 +51,14 @@ class App:
     else:
       addr = int( self.arg1, 16 );
 
+    print("Waking up chip");
+    self.prom.wakeup();
+
     (mfr_id,dev_id,dev_cap) = self.prom.read_id();
-    print("Found "+mfr_id+" "+dev_id+" "+str(dev_cap)+" MBytes" );
+    print("Read mfr_id=%s dev_id=%s dev_cap=%dMBytes" % (mfr_id, dev_id, dev_cap));
+    if mfr_id == "255":
+      print("SPI Flash not found")
+      return
 
     print("Bulk Erasing...");
     self.prom.erase();
@@ -93,17 +101,20 @@ class micron_prom:
     self.spi_link = spi_link;
     return;
 
+  def wakeup ( self ):
+    self.spi_link.xfer([0xAB], 20); # Wake up
+
   def read_id ( self ):
     miso_bytes = self.spi_link.xfer( [0x9F], 17 );# Micron READ_ID
     ( mfr_id, dev_id, dev_capacity ) = miso_bytes[0:3];
     if ( mfr_id == 0x20 ):
       mfr_id = "Micron";
     else:
-      mfr_id = "%02" % mfr_id;
+      mfr_id = "%02d" % mfr_id;
     if ( dev_id == 0xBA ): 
       dev_id = "N25Q128A";
     else:
-      dev_id = "%02" % dev_id;
+      dev_id = "%02d" % dev_id;
     dev_capacity = (2**dev_capacity) / (1024 * 1024 );
     return ( mfr_id, dev_id, dev_capacity );# 0x20, 0xBA, 0x18 == 128Mb
 
@@ -193,6 +204,7 @@ class spi_link:
       raise RuntimeError("ERROR: Unable to import RaspPi RPi.GPIO module");
 
     if ( platform == "ice_zero_proto" ):
+      GPIO.setwarnings(False)
       GPIO.setmode(GPIO.BOARD);
       self.pin_rst_l = 37;
       self.pin_clk   = 36;
